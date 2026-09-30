@@ -1,0 +1,99 @@
+services:
+  step-ca:
+    image: smallstep/step-ca:latest
+    container_name: step-ca
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    volumes:
+      - stepca-data:/home/step
+    environment:
+      DOCKER_STEPCA_INIT_NAME: "Home Lab CA"
+      DOCKER_STEPCA_INIT_DNS_NAMES: "step-ca,step-ca.home.arpa,localhost"
+      DOCKER_STEPCA_INIT_PROVISIONER_NAME: "acme"
+      DOCKER_STEPCA_INIT_ACME: "true"
+    networks:
+      - edge
+
+  traefik:
+    image: traefik:latest
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.stepca.acme.email=admin@home.arpa"
+      - "--certificatesresolvers.stepca.acme.storage=/certs/acme.json"
+      - "--certificatesresolvers.stepca.acme.caserver=https://step-ca:9000/acme/acme/directory"
+      - "--certificatesresolvers.stepca.acme.httpchallenge=true"
+      - "--certificatesresolvers.stepca.acme.httpchallenge.entrypoint=web"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--log.level=INFO"
+    environment:
+      # Required so Traefik's own ACME client trusts step-ca's self-signed
+      # root when talking to it over HTTPS. Mounting the cert alone into
+      # /etc/ssl/certs does NOT register it in the OS trust bundle — this
+      # env var is what actually makes Traefik's ACME client trust it.
+      LEGO_CA_CERTIFICATES: /etc/ssl/certs/stepca-root.crt
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik-certs:/certs
+      - ./stepca-root.crt:/etc/ssl/certs/stepca-root.crt:ro
+    networks:
+      edge:
+        aliases:
+          - keycloak.home.arpa
+    depends_on:
+      - step-ca
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    container_name: keycloak
+    restart: unless-stopped
+    command: ["start-dev"]
+    environment:
+      KC_HOSTNAME: keycloak.home.arpa
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: "xforwarded"
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD}
+    # ports:
+    #   - "8080:8080"
+    # ^ TEMPORARY diagnostic only. Bypasses Traefik/TLS entirely, exposing
+    # Keycloak over plain HTTP on the host. Useful for isolating whether a
+    # failure is TLS/trust-related (e.g. testing an OIDC connection over
+    # HTTP first) vs. a Keycloak/realm/client config problem. Leave this
+    # commented out for normal use — uncomment only while actively
+    # diagnosing, and comment it back out (or `docker compose up -d`
+    # after removing it) once you're done, so Keycloak is only reachable
+    # through Traefik/HTTPS again.
+    volumes:
+      - keycloak-data:/opt/keycloak/data
+      # Lets Keycloak trust step-ca's root for its own outbound TLS calls.
+      - ./stepca-root.crt:/etc/pki/ca-trust/source/anchors/stepca-root.crt:ro
+    networks:
+      - edge
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.keycloak.rule=Host(`keycloak.home.arpa`)"
+      - "traefik.http.routers.keycloak.entrypoints=websecure"
+      - "traefik.http.routers.keycloak.tls.certresolver=stepca"
+      - "traefik.http.services.keycloak.loadbalancer.server.port=8080"
+    depends_on:
+      - traefik
+
+networks:
+  edge:
+    driver: bridge
+
+volumes:
+  stepca-data:
+  traefik-certs:
+  keycloak-data:

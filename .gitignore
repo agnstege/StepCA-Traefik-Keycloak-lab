@@ -1,0 +1,5 @@
+.env
+*.tgz
+certs/
+stepca-root.crt
+docker-compose.yml.works
